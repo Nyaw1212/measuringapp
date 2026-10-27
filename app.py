@@ -16,7 +16,7 @@ class Measurement:
     label: str
     start: QPointF
     end: QPointF
-    meters: float
+    feet: float
 
 class PhotoView(QGraphicsView):
     points_selected = Signal(QPointF, QPointF)
@@ -31,6 +31,11 @@ class PhotoView(QGraphicsView):
         self.start_point = None
         self.mode = 'none'
         self.overlays = []
+        self.preview_line = None
+        self.preview_text = None
+        self.feet_per_pixel = None
+        self.dragging_endpoint = False
+        self.setMouseTracking(True)
         self.setMinimumSize(700, 480)
 
     def load_photo(self, path):
@@ -43,6 +48,8 @@ class PhotoView(QGraphicsView):
         self.pixmap_item.setZValue(-5)
         self.canvas.setSceneRect(QRectF(photo.rect()))
         self.start_point = None
+        self.preview_line = None
+        self.preview_text = None
         self.resetTransform()
         self.fitInView(self.canvas.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
         return True
@@ -50,23 +57,78 @@ class PhotoView(QGraphicsView):
     def set_mode(self, mode):
         self.mode = mode
         self.start_point = None
+        self.clear_preview()
         self.setCursor(Qt.CursorShape.CrossCursor if mode != 'none' else Qt.CursorShape.ArrowCursor)
+
+    def current_anchor(self):
+        return self.start_point
+
+    def clear_preview(self):
+        for item in (self.preview_line, self.preview_text):
+            if item is not None and item.scene() is self.canvas:
+                self.canvas.removeItem(item)
+        self.preview_line = None
+        self.preview_text = None
+
+    def update_preview(self, p):
+        anchor = self.current_anchor()
+        if anchor is None or self.mode == 'none':
+            self.clear_preview()
+            return
+        self.clear_preview()
+        pen = QPen(QColor('#ffeb75'), 2, Qt.PenStyle.DashLine)
+        pen.setCosmetic(True)
+        self.preview_line = self.canvas.addLine(anchor.x(), anchor.y(), p.x(), p.y(), pen)
+        self.preview_line.setZValue(20)
+        length_px = math.hypot(p.x()-anchor.x(), p.y()-anchor.y())
+        label = f'{length_px * self.feet_per_pixel:.2f} ft' if self.feet_per_pixel else 'Preview'
+        self.preview_text = self.canvas.addSimpleText(label)
+        self.preview_text.setBrush(QBrush(QColor('#ffeb75')))
+        self.preview_text.setPos((anchor.x()+p.x())/2+8, (anchor.y()+p.y())/2+8)
+        self.preview_text.setZValue(21)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton and self.mode != 'none' and self.pixmap_item:
             p = self.mapToScene(event.position().toPoint())
             if not self.pixmap_item.sceneBoundingRect().contains(p):
                 return
-            if self.mode == 'continuous':
-                self.path_point_selected.emit(p)
-                return
             if self.start_point is None:
                 self.start_point = p
-            else:
-                start, self.start_point = self.start_point, None
-                self.points_selected.emit(start, p)
+                if self.mode == 'continuous':
+                    self.path_point_selected.emit(p)
+                return
+            self.dragging_endpoint = True
+            self.update_preview(p)
             return
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self.start_point is not None and self.pixmap_item:
+            p = self.mapToScene(event.position().toPoint())
+            rect = self.pixmap_item.sceneBoundingRect()
+            p = QPointF(max(rect.left(), min(rect.right(), p.x())),
+                        max(rect.top(), min(rect.bottom(), p.y())))
+            self.update_preview(p)
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self.dragging_endpoint:
+            self.dragging_endpoint = False
+            p = self.mapToScene(event.position().toPoint())
+            rect = self.pixmap_item.sceneBoundingRect()
+            p = QPointF(max(rect.left(), min(rect.right(), p.x())),
+                        max(rect.top(), min(rect.bottom(), p.y())))
+            a = self.start_point
+            if a is not None and math.hypot(p.x()-a.x(), p.y()-a.y()) >= 1:
+                self.clear_preview()
+                if self.mode == 'continuous':
+                    self.start_point = p
+                    self.path_point_selected.emit(p)
+                else:
+                    self.start_point = None
+                    self.points_selected.emit(a, p)
+            return
+        super().mouseReleaseEvent(event)
 
     def wheelEvent(self, event):
         if not self.pixmap_item:
@@ -96,15 +158,15 @@ class PhotoView(QGraphicsView):
         for item in self.overlays:
             self.canvas.removeItem(item)
         self.overlays.clear()
-        self.start_point = None
+        self.clear_preview()
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('Photo Measuring App — v0.4')
+        self.setWindowTitle('Photo Measuring App — v0.5')
         self.resize(1180, 760)
         self.image_path = None
-        self.meters_per_pixel = None
+        self.feet_per_pixel = None
         self.calibration_points = None
         self.measurements = []
         self.paths = []
@@ -134,8 +196,8 @@ class MainWindow(QMainWindow):
         self.reference = QDoubleSpinBox()
         self.reference.setRange(0.001, 100000)
         self.reference.setDecimals(3)
-        self.reference.setValue(3.000)
-        self.reference.setSuffix(' m')
+        self.reference.setValue(10.000)
+        self.reference.setSuffix(' ft')
         self.reference.setToolTip('Known physical distance between calibration endpoints')
         self.reference.valueChanged.connect(self.reference_changed)
         self.measure_list = QListWidget()
@@ -182,7 +244,8 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, 'Invalid photo', 'Could not open the image.')
             return
         self.image_path = path
-        self.meters_per_pixel = None
+        self.feet_per_pixel = None
+        self.view.feet_per_pixel = None
         self.calibration_points = None
         self.measurements.clear()
         self.paths.clear()
@@ -208,7 +271,7 @@ class MainWindow(QMainWindow):
             self.instructions.setText('Click consecutive points to trace a path. Finish Path to save it; Undo Last Point to correct it.')
         else:
             self.instructions.setText('Click point 1, then click point 2 on the photo.')
-        self.statusBar().showMessage(f'{mode.title()} — select two endpoints')
+        self.statusBar().showMessage(f'{mode.title()} — click first point, then move or drag the next endpoint')
 
     def points_received(self, a, b):
         distance_px = math.hypot(b.x()-a.x(), b.y()-a.y())
@@ -217,7 +280,7 @@ class MainWindow(QMainWindow):
             return
         if self.view.mode == 'calibrate':
             length, accepted = QInputDialog.getDouble(self, 'Reference length',
-                'Actual distance between selected points (meters):',
+                'Actual distance between selected points (feet):',
                 self.reference.value(), 0.001, 100000.0, 3)
             if not accepted:
                 self.instructions.setText('Reference cancelled. Select two points to try again.')
@@ -229,10 +292,10 @@ class MainWindow(QMainWindow):
             label = self.alpha_label(len(self.measurements))
             meters = distance_px * self.meters_per_pixel
             self.save_undo()
-            self.measurements.append(Measurement(label, a, b, meters))
-            self.measure_list.addItem(f'Measure {label}: {meters:.3f} m')
-            self.view.add_line(a, b, f'{label}: {meters:.3f} m', '#41e090')
-            self.statusBar().showMessage(f'Measure {label}: {meters:.3f} m')
+            self.measurements.append(Measurement(label, a, b, feet))
+            self.measure_list.addItem(f'Measure {label}: {feet:.3f} ft')
+            self.view.add_line(a, b, f'{label}: {feet:.3f} ft', '#41e090')
+            self.statusBar().showMessage(f'Measure {label}: {feet:.3f} ft')
 
     def add_path_point(self, point):
         if self.meters_per_pixel is None:
@@ -244,6 +307,7 @@ class MainWindow(QMainWindow):
         self.save_undo()
         self.active_path.append(point)
         self.render_annotations()
+        self.view.start_point = self.active_path[-1]
         self.statusBar().showMessage(f'Continuous path: {len(self.active_path)} points')
 
     def snapshot(self):
@@ -267,6 +331,8 @@ class MainWindow(QMainWindow):
         self.measurements, self.paths, self.active_path = copy.deepcopy(state)
         self.render_annotations()
         self.view.set_mode('continuous' if self.active_path else 'none')
+        if self.active_path:
+            self.view.start_point = self.active_path[-1]
 
     def undo_path_point(self):
         self.undo()
@@ -303,9 +369,9 @@ class MainWindow(QMainWindow):
             a, b = points[i-1], points[i]
             meters = math.hypot(b.x()-a.x(), b.y()-a.y()) * self.meters_per_pixel
             total += meters
-            self.view.add_line(a, b, f'{i}: {meters:.3f} m', color)
-            self.measure_list.addItem(f'{title} segment {i}: {meters:.3f} m')
-        self.measure_list.addItem(f'{title} TOTAL: {total:.3f} m')
+            self.view.add_line(a, b, f'{i}: {feet:.3f} ft', color)
+            self.measure_list.addItem(f'{title} segment {i}: {feet:.3f} ft')
+        self.measure_list.addItem(f'{title} TOTAL: {total:.3f} ft')
 
     @staticmethod
     def alpha_label(index):
@@ -326,8 +392,8 @@ class MainWindow(QMainWindow):
             return
         self.meters_per_pixel = self.reference.value()/px
         self.render_annotations()
-        self.scale_text.setText(f'Scale: {self.meters_per_pixel:.7f} m/image-pixel')
-        self.instructions.setText('Reference set. Click Measure Next Length and select two endpoints.')
+        self.scale_text.setText(f'Scale: {self.meters_per_pixel:.7f} ft/image-pixel')
+        self.instructions.setText('Reference set in feet. Move cursor for a live preview; hold and drag to position the endpoint.')
         self.view.set_mode('none')
         self.statusBar().showMessage('Calibration complete.')
 
@@ -337,9 +403,11 @@ class MainWindow(QMainWindow):
 
     def render_annotations(self):
         self.view.clear_annotations()
+        if self.view.mode == 'continuous' and self.active_path:
+            self.view.start_point = self.active_path[-1]
         if self.calibration_points:
             a, b = self.calibration_points
-            self.view.add_line(a, b, f'REF: {self.reference.value():.3f} m', '#ffac4b')
+            self.view.add_line(a, b, f'REF: {self.reference.value():.3f} ft', '#ffac4b')
         self.measure_list.clear()
         for index, path in enumerate(self.paths, 1):
             self.draw_path(path, f'Path {index}', '#42b9ff')
@@ -350,7 +418,7 @@ class MainWindow(QMainWindow):
                 pixel_length = math.hypot(
                     measurement.end.x()-measurement.start.x(),
                     measurement.end.y()-measurement.start.y())
-                measurement.meters = pixel_length * self.meters_per_pixel
+                measurement.feet = pixel_length * self.meters_per_pixel
             self.view.add_line(measurement.start, measurement.end,
                 f'{measurement.label}: {measurement.meters:.3f} m', '#41e090')
             self.measure_list.addItem(
