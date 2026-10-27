@@ -46,12 +46,14 @@ class PhotoView(QGraphicsView):
         self.overlays.clear()
         self.pixmap_item = self.canvas.addPixmap(photo)
         self.pixmap_item.setZValue(-5)
-        self.canvas.setSceneRect(QRectF(photo.rect()))
+        bounds = QRectF(photo.rect())
+        margin = max(bounds.width(), bounds.height()) * 1.5
+        self.canvas.setSceneRect(bounds.adjusted(-margin, -margin, margin, margin))
         self.start_point = None
         self.preview_line = None
         self.preview_text = None
         self.resetTransform()
-        self.fitInView(self.canvas.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+        self.fitInView(QRectF(photo.rect()), Qt.AspectRatioMode.KeepAspectRatio)
         return True
 
     def set_mode(self, mode):
@@ -90,8 +92,6 @@ class PhotoView(QGraphicsView):
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton and self.mode != 'none' and self.pixmap_item:
             p = self.mapToScene(event.position().toPoint())
-            if not self.pixmap_item.sceneBoundingRect().contains(p):
-                return
             if self.start_point is None:
                 self.start_point = p
                 if self.mode == 'continuous':
@@ -105,9 +105,6 @@ class PhotoView(QGraphicsView):
     def mouseMoveEvent(self, event):
         if self.start_point is not None and self.pixmap_item:
             p = self.mapToScene(event.position().toPoint())
-            rect = self.pixmap_item.sceneBoundingRect()
-            p = QPointF(max(rect.left(), min(rect.right(), p.x())),
-                        max(rect.top(), min(rect.bottom(), p.y())))
             self.update_preview(p)
         super().mouseMoveEvent(event)
 
@@ -115,9 +112,6 @@ class PhotoView(QGraphicsView):
         if event.button() == Qt.MouseButton.LeftButton and self.dragging_endpoint:
             self.dragging_endpoint = False
             p = self.mapToScene(event.position().toPoint())
-            rect = self.pixmap_item.sceneBoundingRect()
-            p = QPointF(max(rect.left(), min(rect.right(), p.x())),
-                        max(rect.top(), min(rect.bottom(), p.y())))
             a = self.start_point
             if a is not None and math.hypot(p.x()-a.x(), p.y()-a.y()) >= 1:
                 self.clear_preview()
@@ -163,7 +157,7 @@ class PhotoView(QGraphicsView):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('Photo Measuring App — v0.5')
+        self.setWindowTitle('Photo Measuring App — v0.6')
         self.resize(1180, 760)
         self.image_path = None
         self.feet_per_pixel = None
@@ -436,7 +430,7 @@ class MainWindow(QMainWindow):
 
     def fit_photo(self):
         if self.view.pixmap_item:
-            self.view.fitInView(self.view.canvas.sceneRect(),
+            self.view.fitInView(self.view.pixmap_item.sceneBoundingRect(),
                                 Qt.AspectRatioMode.KeepAspectRatio)
 
 def main():
