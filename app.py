@@ -8,7 +8,7 @@ from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QBrush, QPen, QPixmap
 from PySide6.QtWidgets import (QApplication, QDoubleSpinBox, QFileDialog, QGraphicsPixmapItem,
     QGraphicsScene, QGraphicsView, QHBoxLayout, QLabel, QListWidget, QMainWindow,
-    QMessageBox, QPushButton, QVBoxLayout, QWidget)
+    QMessageBox, QPushButton, QVBoxLayout, QWidget, QInputDialog)
 
 @dataclass
 class Measurement:
@@ -96,7 +96,7 @@ class PhotoView(QGraphicsView):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('Photo Measuring App — v0.1')
+        self.setWindowTitle('Photo Measuring App — v0.2')
         self.resize(1180, 760)
         self.image_path = None
         self.meters_per_pixel = None
@@ -107,9 +107,9 @@ class MainWindow(QMainWindow):
 
         self.open_button = QPushButton('Open Photo')
         self.open_button.clicked.connect(self.open_photo)
-        self.calibrate_button = QPushButton('Calibrate: 2 Points')
+        self.calibrate_button = QPushButton('Set / Replace Reference')
         self.calibrate_button.clicked.connect(lambda: self.begin('calibrate'))
-        self.measure_button = QPushButton('Measure: A–B')
+        self.measure_button = QPushButton('Measure Next Length')
         self.measure_button.clicked.connect(lambda: self.begin('measure'))
         self.clear_button = QPushButton('Clear Measurements')
         self.clear_button.clicked.connect(self.clear_measurements)
@@ -130,9 +130,7 @@ class MainWindow(QMainWindow):
         side = QWidget()
         layout = QVBoxLayout(side)
         layout.addWidget(self.open_button)
-        layout.addWidget(QLabel('Known reference length:'))
-        layout.addWidget(self.reference)
-        layout.addWidget(self.calibrate_button)
+                layout.addWidget(self.calibrate_button)
         layout.addWidget(self.measure_button)
         layout.addWidget(self.fit_button)
         layout.addWidget(self.clear_button)
@@ -163,7 +161,7 @@ class MainWindow(QMainWindow):
         self.measure_list.clear()
         self.scale_text.setText('Scale: not calibrated')
         self.view.set_mode('none')
-        self.instructions.setText('Enter known wall length, click Calibrate, then click both ends.')
+        self.instructions.setText('Click Set / Replace Reference, then select two points and enter their actual length.')
         self.statusBar().showMessage(f'Loaded {Path(path).name}')
 
     def begin(self, mode):
@@ -171,8 +169,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, 'Load a photo', 'Open a photo first.')
             return
         if mode == 'measure' and self.meters_per_pixel is None:
-            QMessageBox.information(self, 'Calibrate first', 'Define a reference length first.')
-            return
+            mode = 'calibrate'
         self.view.set_mode(mode)
         self.instructions.setText('Click point 1, then click point 2 on the photo.')
         self.statusBar().showMessage(f'{mode.title()} — select two endpoints')
@@ -183,6 +180,13 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, 'Points too close', 'Choose two distinct points.')
             return
         if self.view.mode == 'calibrate':
+            length, accepted = QInputDialog.getDouble(self, 'Reference length',
+                'Actual distance between selected points (meters):',
+                self.reference.value(), 0.001, 100000.0, 3)
+            if not accepted:
+                self.instructions.setText('Reference cancelled. Select two points to try again.')
+                return
+            self.reference.setValue(length)
             self.calibration_points = (a, b)
             self.apply_calibration()
         elif self.view.mode == 'measure' and self.meters_per_pixel is not None:
@@ -213,7 +217,7 @@ class MainWindow(QMainWindow):
         self.meters_per_pixel = self.reference.value()/px
         self.render_annotations()
         self.scale_text.setText(f'Scale: {self.meters_per_pixel:.7f} m/image-pixel')
-        self.instructions.setText('Scale set. Click Measure and select two endpoints.')
+        self.instructions.setText('Reference set. Click Measure Next Length and select two endpoints.')
         self.view.set_mode('none')
         self.statusBar().showMessage('Calibration complete.')
 
