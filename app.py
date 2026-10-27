@@ -19,6 +19,7 @@ class Measurement:
 
 class PhotoView(QGraphicsView):
     points_selected = Signal(QPointF, QPointF)
+    path_point_selected = Signal(QPointF)
     def __init__(self):
         super().__init__()
         self.canvas = QGraphicsScene(self)
@@ -54,6 +55,9 @@ class PhotoView(QGraphicsView):
         if event.button() == Qt.MouseButton.LeftButton and self.mode != 'none' and self.pixmap_item:
             p = self.mapToScene(event.position().toPoint())
             if not self.pixmap_item.sceneBoundingRect().contains(p):
+                return
+            if self.mode == 'continuous':
+                self.path_point_selected.emit(p)
                 return
             if self.start_point is None:
                 self.start_point = p
@@ -96,14 +100,17 @@ class PhotoView(QGraphicsView):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('Photo Measuring App — v0.2')
+        self.setWindowTitle('Photo Measuring App — v0.3')
         self.resize(1180, 760)
         self.image_path = None
         self.meters_per_pixel = None
         self.calibration_points = None
         self.measurements = []
+        self.paths = []
+        self.active_path = []
         self.view = PhotoView()
         self.view.points_selected.connect(self.points_received)
+        self.view.path_point_selected.connect(self.add_path_point)
 
         self.open_button = QPushButton('Open Photo')
         self.open_button.clicked.connect(self.open_photo)
@@ -111,6 +118,12 @@ class MainWindow(QMainWindow):
         self.calibrate_button.clicked.connect(lambda: self.begin('calibrate'))
         self.measure_button = QPushButton('Measure Next Length')
         self.measure_button.clicked.connect(lambda: self.begin('measure'))
+        self.continuous_button = QPushButton('Continuous Measurement')
+        self.continuous_button.clicked.connect(lambda: self.begin('continuous'))
+        self.undo_button = QPushButton('Undo Last Point')
+        self.undo_button.clicked.connect(self.undo_path_point)
+        self.finish_button = QPushButton('Finish Path')
+        self.finish_button.clicked.connect(self.finish_path)
         self.clear_button = QPushButton('Clear Measurements')
         self.clear_button.clicked.connect(self.clear_measurements)
         self.fit_button = QPushButton('Fit Photo')
@@ -132,6 +145,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.open_button)
         layout.addWidget(self.calibrate_button)
         layout.addWidget(self.measure_button)
+        layout.addWidget(self.continuous_button)
+        layout.addWidget(self.undo_button)
+        layout.addWidget(self.finish_button)
         layout.addWidget(self.fit_button)
         layout.addWidget(self.clear_button)
         layout.addWidget(self.scale_text)
@@ -158,6 +174,8 @@ class MainWindow(QMainWindow):
         self.meters_per_pixel = None
         self.calibration_points = None
         self.measurements.clear()
+        self.paths.clear()
+        self.active_path.clear()
         self.measure_list.clear()
         self.scale_text.setText('Scale: not calibrated')
         self.view.set_mode('none')
@@ -168,10 +186,15 @@ class MainWindow(QMainWindow):
         if not self.image_path:
             QMessageBox.information(self, 'Load a photo', 'Open a photo first.')
             return
-        if mode == 'measure' and self.meters_per_pixel is None:
+        if mode in ('measure', 'continuous') and self.meters_per_pixel is None:
             mode = 'calibrate'
+        if self.active_path and mode != 'continuous':
+            self.finish_path()
         self.view.set_mode(mode)
-        self.instructions.setText('Click point 1, then click point 2 on the photo.')
+        if mode == 'continuous':
+            self.instructions.setText('Click consecutive points to trace a path. Finish Path to save it; Undo Last Point to correct it.')
+        else:
+            self.instructions.setText('Click point 1, then click point 2 on the photo.')
         self.statusBar().showMessage(f'{mode.title()} — select two endpoints')
 
     def points_received(self, a, b):
@@ -196,6 +219,48 @@ class MainWindow(QMainWindow):
             self.measure_list.addItem(f'Measure {label}: {meters:.3f} m')
             self.view.add_line(a, b, f'{label}: {meters:.3f} m', '#41e090')
             self.statusBar().showMessage(f'Measure {label}: {meters:.3f} m')
+
+    def add_path_point(self, point):
+        if self.meters_per_pixel is None:
+            return
+        if self.active_path:
+            previous = self.active_path[-1]
+            if math.hypot(point.x()-previous.x(), point.y()-previous.y()) < 1:
+                return
+        self.active_path.append(point)
+        self.render_annotations()
+        self.statusBar().showMessage(f'Continuous path: {len(self.active_path)} points')
+
+    def undo_path_point(self):
+        if self.active_path:
+            self.active_path.pop()
+            self.render_annotations()
+            self.statusBar().showMessage('Last path point removed.')
+
+    def finish_path(self):
+        if len(self.active_path) >= 2:
+            self.paths.append(self.active_path.copy())
+            self.statusBar().showMessage('Continuous path saved.')
+        self.active_path.clear()
+        self.render_annotations()
+        if self.view.mode == 'continuous':
+            self.view.set_mode('none')
+
+    def draw_path(self, points, title, color):
+        if not points:
+            return
+        if len(points) == 1:
+            p = points[0]
+            self.view.add_line(p, p, title + ' start', color)
+            return
+        total = 0.0
+        for i in range(1, len(points)):
+            a, b = points[i-1], points[i]
+            meters = math.hypot(b.x()-a.x(), b.y()-a.y()) * self.meters_per_pixel
+            total += meters
+            self.view.add_line(a, b, f'{i}: {meters:.3f} m', color)
+            self.measure_list.addItem(f'{title} segment {i}: {meters:.3f} m')
+        self.measure_list.addItem(f'{title} TOTAL: {total:.3f} m')
 
     @staticmethod
     def alpha_label(index):
@@ -231,6 +296,10 @@ class MainWindow(QMainWindow):
             a, b = self.calibration_points
             self.view.add_line(a, b, f'REF: {self.reference.value():.3f} m', '#ffac4b')
         self.measure_list.clear()
+        for index, path in enumerate(self.paths, 1):
+            self.draw_path(path, f'Path {index}', '#42b9ff')
+        if self.active_path:
+            self.draw_path(self.active_path, 'Current path', '#e8d66c')
         for measurement in self.measurements:
             if self.meters_per_pixel is not None:
                 pixel_length = math.hypot(
@@ -244,6 +313,8 @@ class MainWindow(QMainWindow):
 
     def clear_measurements(self):
         self.measurements.clear()
+        self.paths.clear()
+        self.active_path.clear()
         self.render_annotations()
         self.statusBar().showMessage('Measurements cleared; calibration retained.')
 
