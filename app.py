@@ -130,7 +130,7 @@ class MainWindow(QMainWindow):
         side = QWidget()
         layout = QVBoxLayout(side)
         layout.addWidget(self.open_button)
-                layout.addWidget(self.calibrate_button)
+        layout.addWidget(self.calibrate_button)
         layout.addWidget(self.measure_button)
         layout.addWidget(self.fit_button)
         layout.addWidget(self.clear_button)
