@@ -262,7 +262,7 @@ class MainWindow(QMainWindow):
         if not self.image_path:
             QMessageBox.information(self, 'Load a photo', 'Open a photo first.')
             return
-        if mode in ('measure', 'continuous') and self.meters_per_pixel is None:
+        if mode in ('measure', 'continuous') and self.feet_per_pixel is None:
             mode = 'calibrate'
         if self.active_path and mode != 'continuous':
             self.finish_path()
@@ -288,9 +288,9 @@ class MainWindow(QMainWindow):
             self.reference.setValue(length)
             self.calibration_points = (a, b)
             self.apply_calibration()
-        elif self.view.mode == 'measure' and self.meters_per_pixel is not None:
+        elif self.view.mode == 'measure' and self.feet_per_pixel is not None:
             label = self.alpha_label(len(self.measurements))
-            meters = distance_px * self.meters_per_pixel
+            feet = distance_px * self.feet_per_pixel
             self.save_undo()
             self.measurements.append(Measurement(label, a, b, feet))
             self.measure_list.addItem(f'Measure {label}: {feet:.3f} ft')
@@ -298,7 +298,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f'Measure {label}: {feet:.3f} ft')
 
     def add_path_point(self, point):
-        if self.meters_per_pixel is None:
+        if self.feet_per_pixel is None:
             return
         if self.active_path:
             previous = self.active_path[-1]
@@ -340,7 +340,7 @@ class MainWindow(QMainWindow):
     def enter_measurement(self):
         if not self.image_path:
             return
-        if self.meters_per_pixel is None:
+        if self.feet_per_pixel is None:
             self.begin('calibrate')
             return
         if self.view.mode == 'continuous':
@@ -367,8 +367,8 @@ class MainWindow(QMainWindow):
         total = 0.0
         for i in range(1, len(points)):
             a, b = points[i-1], points[i]
-            meters = math.hypot(b.x()-a.x(), b.y()-a.y()) * self.meters_per_pixel
-            total += meters
+            feet = math.hypot(b.x()-a.x(), b.y()-a.y()) * self.feet_per_pixel
+            total += feet
             self.view.add_line(a, b, f'{i}: {feet:.3f} ft', color)
             self.measure_list.addItem(f'{title} segment {i}: {feet:.3f} ft')
         self.measure_list.addItem(f'{title} TOTAL: {total:.3f} ft')
@@ -390,9 +390,10 @@ class MainWindow(QMainWindow):
         px = math.hypot(b.x()-a.x(), b.y()-a.y())
         if px < 1:
             return
-        self.meters_per_pixel = self.reference.value()/px
+        self.feet_per_pixel = self.reference.value()/px
+        self.view.feet_per_pixel = self.feet_per_pixel
         self.render_annotations()
-        self.scale_text.setText(f'Scale: {self.meters_per_pixel:.7f} ft/image-pixel')
+        self.scale_text.setText(f'Scale: {self.feet_per_pixel:.7f} ft/image-pixel')
         self.instructions.setText('Reference set in feet. Move cursor for a live preview; hold and drag to position the endpoint.')
         self.view.set_mode('none')
         self.statusBar().showMessage('Calibration complete.')
@@ -414,15 +415,15 @@ class MainWindow(QMainWindow):
         if self.active_path:
             self.draw_path(self.active_path, 'Current path', '#e8d66c')
         for measurement in self.measurements:
-            if self.meters_per_pixel is not None:
+            if self.feet_per_pixel is not None:
                 pixel_length = math.hypot(
                     measurement.end.x()-measurement.start.x(),
                     measurement.end.y()-measurement.start.y())
-                measurement.feet = pixel_length * self.meters_per_pixel
+                measurement.feet = pixel_length * self.feet_per_pixel
             self.view.add_line(measurement.start, measurement.end,
-                f'{measurement.label}: {measurement.meters:.3f} m', '#41e090')
+                f'{measurement.label}: {measurement.feet:.3f} ft', '#41e090')
             self.measure_list.addItem(
-                f'Measure {measurement.label}: {measurement.meters:.3f} m')
+                f'Measure {measurement.label}: {measurement.feet:.3f} ft')
 
     def clear_measurements(self):
         if self.measurements or self.paths or self.active_path:
