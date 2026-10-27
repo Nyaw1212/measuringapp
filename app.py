@@ -1,11 +1,12 @@
 """Photo Measuring App — calibrated 2D measurement prototype."""
 from __future__ import annotations
 import math
+import copy
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QBrush, QPen, QPixmap
+from PySide6.QtGui import QColor, QBrush, QPen, QPixmap, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QApplication, QDoubleSpinBox, QFileDialog, QGraphicsPixmapItem,
     QGraphicsScene, QGraphicsView, QHBoxLayout, QLabel, QListWidget, QMainWindow,
     QMessageBox, QPushButton, QVBoxLayout, QWidget, QInputDialog)
@@ -100,7 +101,7 @@ class PhotoView(QGraphicsView):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('Photo Measuring App — v0.3')
+        self.setWindowTitle('Photo Measuring App — v0.4')
         self.resize(1180, 760)
         self.image_path = None
         self.meters_per_pixel = None
@@ -108,6 +109,8 @@ class MainWindow(QMainWindow):
         self.measurements = []
         self.paths = []
         self.active_path = []
+        self.undo_stack = []
+        self.redo_stack = []
         self.view = PhotoView()
         self.view.points_selected.connect(self.points_received)
         self.view.path_point_selected.connect(self.add_path_point)
@@ -121,7 +124,7 @@ class MainWindow(QMainWindow):
         self.continuous_button = QPushButton('Continuous Measurement')
         self.continuous_button.clicked.connect(lambda: self.begin('continuous'))
         self.undo_button = QPushButton('Undo Last Point')
-        self.undo_button.clicked.connect(self.undo_path_point)
+        self.undo_button.clicked.connect(self.undo)
         self.finish_button = QPushButton('Finish Path')
         self.finish_button.clicked.connect(self.finish_path)
         self.clear_button = QPushButton('Clear Measurements')
@@ -160,6 +163,14 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(side)
         main_layout.addWidget(self.view, 1)
         self.setCentralWidget(container)
+        self.redo_button = QPushButton('Redo')
+        self.redo_button.clicked.connect(self.redo)
+        layout.insertWidget(5, self.redo_button)
+        for keys, action in [('Ctrl+Z', self.undo), ('Ctrl+Y', self.redo),
+                             ('Ctrl+Shift+Z', self.redo), ('Return', self.enter_measurement)]:
+            shortcut = QShortcut(QKeySequence(keys), self)
+            shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+            shortcut.activated.connect(action)
         self.statusBar().showMessage('Ready — use a known dimension for calibration.')
 
     def open_photo(self):
@@ -176,6 +187,8 @@ class MainWindow(QMainWindow):
         self.measurements.clear()
         self.paths.clear()
         self.active_path.clear()
+        self.undo_stack.clear()
+        self.redo_stack.clear()
         self.measure_list.clear()
         self.scale_text.setText('Scale: not calibrated')
         self.view.set_mode('none')
@@ -215,6 +228,7 @@ class MainWindow(QMainWindow):
         elif self.view.mode == 'measure' and self.meters_per_pixel is not None:
             label = self.alpha_label(len(self.measurements))
             meters = distance_px * self.meters_per_pixel
+            self.save_undo()
             self.measurements.append(Measurement(label, a, b, meters))
             self.measure_list.addItem(f'Measure {label}: {meters:.3f} m')
             self.view.add_line(a, b, f'{label}: {meters:.3f} m', '#41e090')
@@ -227,21 +241,52 @@ class MainWindow(QMainWindow):
             previous = self.active_path[-1]
             if math.hypot(point.x()-previous.x(), point.y()-previous.y()) < 1:
                 return
+        self.save_undo()
         self.active_path.append(point)
         self.render_annotations()
         self.statusBar().showMessage(f'Continuous path: {len(self.active_path)} points')
 
+    def snapshot(self):
+        return copy.deepcopy((self.measurements, self.paths, self.active_path))
+
+    def save_undo(self):
+        self.undo_stack.append(self.snapshot())
+        self.redo_stack.clear()
+
+    def undo(self):
+        if self.undo_stack:
+            self.redo_stack.append(self.snapshot())
+            self.restore(self.undo_stack.pop())
+
+    def redo(self):
+        if self.redo_stack:
+            self.undo_stack.append(self.snapshot())
+            self.restore(self.redo_stack.pop())
+
+    def restore(self, state):
+        self.measurements, self.paths, self.active_path = copy.deepcopy(state)
+        self.render_annotations()
+        self.view.set_mode('continuous' if self.active_path else 'none')
+
     def undo_path_point(self):
-        if self.active_path:
-            self.active_path.pop()
-            self.render_annotations()
-            self.statusBar().showMessage('Last path point removed.')
+        self.undo()
+
+    def enter_measurement(self):
+        if not self.image_path:
+            return
+        if self.meters_per_pixel is None:
+            self.begin('calibrate')
+            return
+        if self.view.mode == 'continuous':
+            self.finish_path()
+        self.begin('continuous')
 
     def finish_path(self):
-        if len(self.active_path) >= 2:
-            self.paths.append(self.active_path.copy())
-            self.statusBar().showMessage('Continuous path saved.')
-        self.active_path.clear()
+        if self.active_path:
+            self.save_undo()
+            if len(self.active_path) >= 2:
+                self.paths.append(self.active_path.copy())
+            self.active_path.clear()
         self.render_annotations()
         if self.view.mode == 'continuous':
             self.view.set_mode('none')
@@ -312,6 +357,8 @@ class MainWindow(QMainWindow):
                 f'Measure {measurement.label}: {measurement.meters:.3f} m')
 
     def clear_measurements(self):
+        if self.measurements or self.paths or self.active_path:
+            self.save_undo()
         self.measurements.clear()
         self.paths.clear()
         self.active_path.clear()
