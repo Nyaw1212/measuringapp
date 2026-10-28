@@ -21,6 +21,7 @@ class Measurement:
 class PhotoView(QGraphicsView):
     points_selected = Signal(QPointF, QPointF)
     path_point_selected = Signal(QPointF)
+    corner_selected = Signal(QPointF)
     def __init__(self):
         super().__init__()
         self.canvas = QGraphicsScene(self)
@@ -85,7 +86,7 @@ class PhotoView(QGraphicsView):
         self.preview_line.setZValue(20)
         length_px = math.hypot(p.x()-anchor.x(), p.y()-anchor.y())
         length_ft = self.distance_function(anchor, p) if self.distance_function else (length_px * self.feet_per_pixel if self.feet_per_pixel else None)
-        label = f'{length_ft:.2f} ft' if length_ft is not None else 'Preview'
+        label = f'{length_ft:.2f} ft' if length_ft is not None else 'Outside calibrated region'
         self.preview_text = self.canvas.addSimpleText(label)
         self.preview_text.setBrush(QBrush(QColor('#ffeb75')))
         self.preview_text.setPos((anchor.x()+p.x())/2+8, (anchor.y()+p.y())/2+8)
@@ -94,6 +95,9 @@ class PhotoView(QGraphicsView):
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton and self.mode != 'none' and self.pixmap_item:
             p = self.mapToScene(event.position().toPoint())
+            if self.mode == 'corners':
+                self.corner_selected.emit(p)
+                return
             if self.start_point is None:
                 self.start_point = p
                 if self.mode == 'continuous':
@@ -159,13 +163,15 @@ class PhotoView(QGraphicsView):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('Photo Measuring App — v0.8')
+        self.setWindowTitle('Photo Measuring App — v0.9')
         self.resize(1180, 760)
         self.image_path = None
         self.rotation_degrees = 0
         self.feet_per_pixel = None
         self.calibration_points = None
         self.axes = {}
+        self.corners = []
+        self.homography = None
         self.measurements = []
         self.paths = []
         self.active_path = []
@@ -175,6 +181,7 @@ class MainWindow(QMainWindow):
         self.view.distance_function = self.distance_ft
         self.view.points_selected.connect(self.points_received)
         self.view.path_point_selected.connect(self.add_path_point)
+        self.view.corner_selected.connect(self.add_corner)
 
         self.open_button = QPushButton('Open Photo')
         self.open_button.clicked.connect(self.open_photo)
@@ -184,6 +191,8 @@ class MainWindow(QMainWindow):
         self.x_axis_button.clicked.connect(lambda: self.begin('axis_x'))
         self.z_axis_button = QPushButton('Set Z Axis (known height)')
         self.z_axis_button.clicked.connect(lambda: self.begin('axis_z'))
+        self.corners_button = QPushButton('Calibrate 4 Corners (DG224NRK)')
+        self.corners_button.clicked.connect(self.begin_corners)
         self.measure_button = QPushButton('Measure Next Length')
         self.measure_button.clicked.connect(lambda: self.begin('measure'))
         self.continuous_button = QPushButton('Continuous Measurement')
@@ -218,6 +227,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.calibrate_button)
         layout.addWidget(self.x_axis_button)
         layout.addWidget(self.z_axis_button)
+        layout.addWidget(self.corners_button)
         layout.addWidget(self.measure_button)
         layout.addWidget(self.continuous_button)
         layout.addWidget(self.undo_button)
@@ -260,6 +270,8 @@ class MainWindow(QMainWindow):
         self.view.feet_per_pixel = None
         self.calibration_points = None
         self.axes.clear()
+        self.corners.clear()
+        self.homography = None
         self.measurements.clear()
         self.paths.clear()
         self.active_path.clear()
@@ -329,6 +341,9 @@ class MainWindow(QMainWindow):
         elif self.view.mode == 'measure' and self.feet_per_pixel is not None:
             label = self.alpha_label(len(self.measurements))
             feet = self.distance_ft(a, b)
+            if feet is None:
+                QMessageBox.warning(self, 'Invalid measurement', 'Measurement crosses an unstable perspective region.')
+                return
             self.save_undo()
             self.measurements.append(Measurement(label, a, b, feet))
             self.measure_list.addItem(f'Measure {label}: {feet:.3f} ft')
@@ -395,11 +410,87 @@ class MainWindow(QMainWindow):
         if self.view.mode == 'continuous':
             self.view.set_mode('none')
 
+    def begin_corners(self):
+        if not self.image_path:
+            QMessageBox.information(self, 'Load a photo', 'Open a photo first.')
+            return
+        if self.active_path:
+            self.finish_path()
+        self.corners = []
+        self.view.set_mode('corners')
+        self.instructions.setText('Click enclosure corners: top-left, top-right, bottom-right, bottom-left.')
+        self.render_annotations()
+
+    def add_corner(self, point):
+        self.corners.append(point)
+        if len(self.corners) < 4:
+            self.instructions.setText(
+                f'{len(self.corners)}/4 corners selected. Next: ' +
+                ['top-left', 'top-right', 'bottom-right', 'bottom-left'][len(self.corners)])
+            self.render_annotations()
+            return
+        try:
+            proposed = self.solve_homography(
+                self.corners, [(0, 0), (16/12, 0),
+                               (16/12, 25.5/12), (0, 25.5/12)])
+        except ValueError as exc:
+            QMessageBox.warning(self, 'Invalid corners', str(exc))
+            self.corners = []
+            self.render_annotations()
+            return
+        self.homography = proposed
+        self.view.set_mode('none')
+        self.update_calibration_status()
+        self.render_annotations()
+        self.statusBar().showMessage('Perspective calibration active — DG224NRK 16 × 25.5 in')
+
+    @staticmethod
+    def solve_homography(points, targets):
+        # Solve the eight homography coefficients using Gaussian elimination.
+        # The final coefficient is fixed to 1.
+        matrix = []
+        for p, (u, v) in zip(points, targets):
+            x, y = p.x(), p.y()
+            matrix.append([x, y, 1, 0, 0, 0, -u*x, -u*y, u])
+            matrix.append([0, 0, 0, x, y, 1, -v*x, -v*y, v])
+        for column in range(8):
+            pivot = max(range(column, 8), key=lambda r: abs(matrix[r][column]))
+            if abs(matrix[pivot][column]) < 1e-10:
+                raise ValueError('Corners are degenerate. Select four distinct rectangle corners.')
+            matrix[column], matrix[pivot] = matrix[pivot], matrix[column]
+            scale = matrix[column][column]
+            matrix[column] = [value/scale for value in matrix[column]]
+            for row in range(8):
+                if row == column:
+                    continue
+                factor = matrix[row][column]
+                matrix[row] = [matrix[row][j]-factor*matrix[column][j] for j in range(9)]
+        result = [matrix[i][8] for i in range(8)] + [1.0]
+        # Check the transform does not send any reference corner to infinity.
+        for p in points:
+            denom = result[6]*p.x()+result[7]*p.y()+1
+            if abs(denom) < 1e-9:
+                raise ValueError('Unstable perspective transform. Re-select the corners.')
+        return result
+
+    def transform_point(self, p):
+        h = self.homography
+        denominator = h[6]*p.x()+h[7]*p.y()+1
+        if abs(denominator) < 1e-9:
+            return None
+        return ((h[0]*p.x()+h[1]*p.y()+h[2])/denominator,
+                (h[3]*p.x()+h[4]*p.y()+h[5])/denominator)
+
     def is_calibrated(self):
-        return len(self.axes) == 2 or self.feet_per_pixel is not None
+        return self.homography is not None or len(self.axes) == 2 or self.feet_per_pixel is not None
 
     def distance_ft(self, a, b):
         dx, dy = b.x()-a.x(), b.y()-a.y()
+        if self.homography is not None:
+            first, second = self.transform_point(a), self.transform_point(b)
+            if first is None or second is None:
+                return None
+            return math.hypot(second[0]-first[0], second[1]-first[1])
         if len(self.axes) == 2:
             x0, x1, width = self.axes['X']
             z0, z1, height = self.axes['Z']
@@ -413,7 +504,10 @@ class MainWindow(QMainWindow):
         return math.hypot(dx, dy) * self.feet_per_pixel if self.feet_per_pixel is not None else None
 
     def update_calibration_status(self):
-        if len(self.axes) == 2:
+        if self.homography is not None:
+            self.scale_text.setText('Calibration: 4-corner perspective (DG224NRK)')
+            self.instructions.setText('Perspective correction active on the enclosure wall plane.')
+        elif len(self.axes) == 2:
             self.scale_text.setText('Calibration: X + Z axes (affine wall plane)')
             self.instructions.setText('Two-axis correction active. Measure along the same wall plane.')
         elif self.axes:
@@ -434,6 +528,8 @@ class MainWindow(QMainWindow):
         for i in range(1, len(points)):
             a, b = points[i-1], points[i]
             feet = self.distance_ft(a, b)
+            if feet is None:
+                continue
             total += feet
             self.view.add_line(a, b, f'{i}: {feet:.3f} ft', color)
             self.measure_list.addItem(f'{title} segment {i}: {feet:.3f} ft')
@@ -470,6 +566,13 @@ class MainWindow(QMainWindow):
 
     def render_annotations(self):
         self.view.clear_annotations()
+        if self.corners:
+            for i, p in enumerate(self.corners):
+                self.view.add_line(p, p, f'Corner {i+1}', '#facc15')
+            if len(self.corners) == 4:
+                for i in range(4):
+                    self.view.add_line(self.corners[i], self.corners[(i+1)%4],
+                                       'Reference edge', '#facc15')
         for key, (a, b, length) in self.axes.items():
             self.view.add_line(a, b, f'{key} AXIS: {length:.3f} ft', '#ff6bc1' if key == 'X' else '#7caaff')
         if self.view.mode == 'continuous' and self.active_path:
@@ -485,6 +588,8 @@ class MainWindow(QMainWindow):
         for measurement in self.measurements:
             if self.feet_per_pixel is not None:
                 measurement.feet = self.distance_ft(measurement.start, measurement.end)
+            if measurement.feet is None:
+                continue
             self.view.add_line(measurement.start, measurement.end,
                 f'{measurement.label}: {measurement.feet:.3f} ft', '#41e090')
             self.measure_list.addItem(
