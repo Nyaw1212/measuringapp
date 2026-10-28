@@ -159,9 +159,10 @@ class PhotoView(QGraphicsView):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('Photo Measuring App — v0.7')
+        self.setWindowTitle('Photo Measuring App — v0.8')
         self.resize(1180, 760)
         self.image_path = None
+        self.rotation_degrees = 0
         self.feet_per_pixel = None
         self.calibration_points = None
         self.axes = {}
@@ -193,6 +194,10 @@ class MainWindow(QMainWindow):
         self.finish_button.clicked.connect(self.finish_path)
         self.clear_button = QPushButton('Clear Measurements')
         self.clear_button.clicked.connect(self.clear_measurements)
+        self.rotate_left_button = QPushButton('Rotate Left 90°')
+        self.rotate_left_button.clicked.connect(lambda: self.rotate_photo(-90))
+        self.rotate_right_button = QPushButton('Rotate Right 90°')
+        self.rotate_right_button.clicked.connect(lambda: self.rotate_photo(90))
         self.fit_button = QPushButton('Fit Photo')
         self.fit_button.clicked.connect(self.fit_photo)
         self.reference = QDoubleSpinBox()
@@ -217,6 +222,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.continuous_button)
         layout.addWidget(self.undo_button)
         layout.addWidget(self.finish_button)
+        layout.addWidget(self.rotate_left_button)
+        layout.addWidget(self.rotate_right_button)
         layout.addWidget(self.fit_button)
         layout.addWidget(self.clear_button)
         layout.addWidget(self.scale_text)
@@ -248,6 +255,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, 'Invalid photo', 'Could not open the image.')
             return
         self.image_path = path
+        self.rotation_degrees = 0
         self.feet_per_pixel = None
         self.view.feet_per_pixel = None
         self.calibration_points = None
@@ -491,8 +499,17 @@ class MainWindow(QMainWindow):
         self.render_annotations()
         self.statusBar().showMessage('Measurements cleared; calibration retained.')
 
+    def rotate_photo(self, degrees):
+        if not self.view.pixmap_item:
+            return
+        self.rotation_degrees = (self.rotation_degrees + degrees) % 360
+        self.fit_photo()
+        self.statusBar().showMessage(f'Photo rotated to {self.rotation_degrees}° (view only)')
+
     def fit_photo(self):
         if self.view.pixmap_item:
+            self.view.resetTransform()
+            self.view.rotate(self.rotation_degrees)
             self.view.fitInView(self.view.pixmap_item.sceneBoundingRect(),
                                 Qt.AspectRatioMode.KeepAspectRatio)
 
