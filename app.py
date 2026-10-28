@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import copy
 import sys
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
@@ -163,7 +164,7 @@ class PhotoView(QGraphicsView):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('Photo Measuring App — v0.9')
+        self.setWindowTitle('Photo Measuring App — v1.0')
         self.resize(1180, 760)
         self.image_path = None
         self.rotation_degrees = 0
@@ -183,6 +184,8 @@ class MainWindow(QMainWindow):
         self.view.path_point_selected.connect(self.add_path_point)
         self.view.corner_selected.connect(self.add_corner)
 
+        self.update_button = QPushButton('Update && Restart App')
+        self.update_button.clicked.connect(self.update_and_restart)
         self.open_button = QPushButton('Open Photo')
         self.open_button.clicked.connect(self.open_photo)
         self.calibrate_button = QPushButton('Set / Replace Reference')
@@ -223,6 +226,7 @@ class MainWindow(QMainWindow):
 
         side = QWidget()
         layout = QVBoxLayout(side)
+        layout.addWidget(self.update_button)
         layout.addWidget(self.open_button)
         layout.addWidget(self.calibrate_button)
         layout.addWidget(self.x_axis_button)
@@ -255,6 +259,31 @@ class MainWindow(QMainWindow):
             shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
             shortcut.activated.connect(action)
         self.statusBar().showMessage('Ready — use a known dimension for calibration.')
+
+    def update_and_restart(self):
+        answer = QMessageBox.question(
+            self, 'Update and Restart',
+            'Download the latest version from GitHub and restart?\n'
+            'Current measurements are not saved and will be lost.',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        script = Path(__file__).resolve().parent / 'update_and_restart.bat'
+        if not script.exists():
+            QMessageBox.warning(self, 'Updater unavailable',
+                                'update_and_restart.bat is missing. Run git pull manually once.')
+            return
+        try:
+            subprocess.Popen(
+                ['cmd.exe', '/c', 'start', '"Measuring App Updater"', 'cmd.exe',
+                 '/k', str(script)],
+                cwd=str(script.parent),
+                creationflags=subprocess.CREATE_NO_WINDOW)
+        except OSError as exc:
+            QMessageBox.critical(self, 'Update failed to launch', str(exc))
+            return
+        QApplication.instance().quit()
 
     def open_photo(self):
         path, _ = QFileDialog.getOpenFileName(self, 'Open Photo', '',
