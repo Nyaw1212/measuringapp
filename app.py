@@ -2,11 +2,13 @@
 from __future__ import annotations
 import math
 import copy
+import json
+import os
 import sys
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal, QEvent
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal, QEvent, QTimer
 from PySide6.QtGui import QColor, QBrush, QPen, QPixmap, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QApplication, QDoubleSpinBox, QFileDialog, QGraphicsPixmapItem,
     QGraphicsScene, QGraphicsView, QGraphicsEllipseItem, QHBoxLayout, QLabel, QListWidget, QMainWindow,
@@ -229,7 +231,7 @@ class PhotoView(QGraphicsView):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('Photo Measuring App — v1.4')
+        self.setWindowTitle('Photo Measuring App — v1.5')
         self.resize(1180, 760)
         self.image_path = None
         self.rotation_degrees = 0
@@ -245,6 +247,12 @@ class MainWindow(QMainWindow):
         self.active_path = []
         self.undo_stack = []
         self.redo_stack = []
+        self.cache_path = Path.home() / '.measuringapp' / 'last_project.json'
+        self.restoring = False
+        self.save_timer = QTimer(self)
+        self.save_timer.setSingleShot(True)
+        self.save_timer.setInterval(500)
+        self.save_timer.timeout.connect(self.save_project)
         self.view = PhotoView()
         self.view.distance_function = self.distance_ft
         self.view.points_selected.connect(self.points_received)
@@ -346,12 +354,91 @@ class MainWindow(QMainWindow):
             shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
             shortcut.activated.connect(action)
         self.statusBar().showMessage('Ready — use a known dimension for calibration.')
+        self.restore_project()
+        self.view.canvas.changed.connect(self.schedule_save)
+
+    def schedule_save(self, *_):
+        if self.image_path and not self.restoring:
+            self.save_timer.start()
+
+    def save_project(self):
+        if not self.image_path or self.restoring:
+            return
+        point = lambda p: [p.x(), p.y()]
+        data = dict(image_path=self.image_path, rotation=self.rotation_degrees,
+            reference=self.reference.value(), width=self.width_input.value(),
+            height=self.height_input.value(),
+            calibration=[point(p) for p in self.calibration_points] if self.calibration_points else None,
+            axes={k: [point(a), point(b), length] for k, (a,b,length) in self.axes.items()},
+            corners=[point(p) for p in self.corners],
+            measurements=[dict(label=m.label, start=point(m.start), end=point(m.end)) for m in self.measurements],
+            paths=[[point(p) for p in path] for path in self.paths],
+            active_path=[point(p) for p in self.active_path])
+        try:
+            self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+            temp = self.cache_path.with_suffix('.tmp')
+            temp.write_text(json.dumps(data), encoding='utf-8')
+            os.replace(temp, self.cache_path)
+        except OSError as exc:
+            self.statusBar().showMessage(f'Auto-save failed: {exc}')
+
+    def restore_project(self):
+        if not self.cache_path.exists():
+            return
+        try:
+            data = json.loads(self.cache_path.read_text(encoding='utf-8'))
+            path = data['image_path']
+            if not Path(path).is_file():
+                self.statusBar().showMessage('Previous project photo is missing.')
+                return
+            self.restoring = True
+            if not self.view.load_photo(path):
+                raise ValueError('Photo could not be opened.')
+            pt = lambda p: QPointF(float(p[0]), float(p[1]))
+            self.image_path = path
+            self.rotation_degrees = int(data.get('rotation', 0))
+            self.reference.setValue(float(data.get('reference', 10)))
+            self.width_input.setValue(float(data.get('width', 16/12)))
+            self.height_input.setValue(float(data.get('height', 25.5/12)))
+            self.reference_width_ft = self.width_input.value()
+            self.reference_height_ft = self.height_input.value()
+            self.calibration_points = tuple(map(pt, data['calibration'])) if data.get('calibration') else None
+            self.axes = {k: (pt(v[0]), pt(v[1]), float(v[2])) for k,v in data.get('axes', {}).items()}
+            self.corners = list(map(pt, data.get('corners', [])))
+            self.feet_per_pixel = None
+            if self.calibration_points:
+                a,b = self.calibration_points
+                pixels = math.hypot(b.x()-a.x(), b.y()-a.y())
+                if pixels:
+                    self.feet_per_pixel = self.reference.value()/pixels
+            self.view.feet_per_pixel = self.feet_per_pixel
+            self.homography = None
+            if len(self.corners) == 4:
+                w,h = self.reference_width_ft, self.reference_height_ft
+                self.homography = self.solve_homography(self.corners, [(0,0),(w,0),(w,h),(0,h)])
+            self.measurements = [Measurement(m['label'], pt(m['start']), pt(m['end']), 0.0) for m in data.get('measurements', [])]
+            self.paths = [[pt(p) for p in path] for path in data.get('paths', [])]
+            self.active_path = list(map(pt, data.get('active_path', [])))
+            self.view.set_mode('none')
+            self.fit_photo()
+            self.update_calibration_status()
+            self.render_annotations()
+            self.statusBar().showMessage('Last project restored.')
+        except (OSError, ValueError, TypeError, KeyError, IndexError, ZeroDivisionError) as exc:
+            self.statusBar().showMessage(f'Restore failed: {exc}')
+        finally:
+            self.restoring = False
+
+    def closeEvent(self, event):
+        self.save_timer.stop()
+        self.save_project()
+        super().closeEvent(event)
 
     def update_and_restart(self):
         answer = QMessageBox.question(
             self, 'Update and Restart',
             'Download the latest version from GitHub and restart?\n'
-            'Current measurements are not saved and will be lost.',
+            'Your project will be saved locally before restarting.',
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No)
         if answer != QMessageBox.StandardButton.Yes:
@@ -361,6 +448,8 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, 'Updater unavailable',
                                 'update_and_restart.bat is missing. Run git pull manually once.')
             return
+        self.save_timer.stop()
+        self.save_project()
         try:
             subprocess.Popen(
                 ['cmd.exe', '/c', 'start', '"Measuring App Updater"', 'cmd.exe',
@@ -403,6 +492,7 @@ class MainWindow(QMainWindow):
         self.view.set_mode('none')
         self.instructions.setText('Click Set / Replace Reference, then select two points and enter their actual length.')
         self.statusBar().showMessage(f'Loaded {Path(path).name}')
+        self.schedule_save()
 
     def begin(self, mode):
         if not self.image_path:
@@ -480,6 +570,7 @@ class MainWindow(QMainWindow):
                 return
         self.save_undo()
         self.active_path.append(point)
+        self.schedule_save()
         self.render_annotations()
         self.view.start_point = self.active_path[-1]
         self.statusBar().showMessage(f'Continuous path: {len(self.active_path)} points')
@@ -503,6 +594,7 @@ class MainWindow(QMainWindow):
 
     def restore(self, state):
         self.measurements, self.paths, self.active_path = copy.deepcopy(state)
+        self.schedule_save()
         self.render_annotations()
         self.view.set_mode('continuous' if self.active_path else 'none')
         if self.active_path:
@@ -583,6 +675,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, 'Invalid rectangle', str(exc))
             return False
         self.homography = proposed
+        self.schedule_save()
         self.view.set_mode('none')
         self.update_calibration_status()
         self.render_annotations()
@@ -752,6 +845,7 @@ class MainWindow(QMainWindow):
         self.active_path.clear()
         self.render_annotations()
         self.statusBar().showMessage('Measurements cleared; calibration retained.')
+        self.schedule_save()
 
     def rotate_photo(self, degrees):
         if not self.view.pixmap_item:
@@ -759,6 +853,7 @@ class MainWindow(QMainWindow):
         self.rotation_degrees = (self.rotation_degrees + degrees) % 360
         self.fit_photo()
         self.statusBar().showMessage(f'Photo rotated to {self.rotation_degrees}° (view only)')
+        self.schedule_save()
 
     def fit_photo(self):
         if self.view.pixmap_item:
