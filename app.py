@@ -34,6 +34,7 @@ class PhotoView(QGraphicsView):
         self.preview_line = None
         self.preview_text = None
         self.feet_per_pixel = None
+        self.distance_function = None
         self.dragging_endpoint = False
         self.setMouseTracking(True)
         self.setMinimumSize(700, 480)
@@ -83,7 +84,8 @@ class PhotoView(QGraphicsView):
         self.preview_line = self.canvas.addLine(anchor.x(), anchor.y(), p.x(), p.y(), pen)
         self.preview_line.setZValue(20)
         length_px = math.hypot(p.x()-anchor.x(), p.y()-anchor.y())
-        label = f'{length_px * self.feet_per_pixel:.2f} ft' if self.feet_per_pixel else 'Preview'
+        length_ft = self.distance_function(anchor, p) if self.distance_function else (length_px * self.feet_per_pixel if self.feet_per_pixel else None)
+        label = f'{length_ft:.2f} ft' if length_ft is not None else 'Preview'
         self.preview_text = self.canvas.addSimpleText(label)
         self.preview_text.setBrush(QBrush(QColor('#ffeb75')))
         self.preview_text.setPos((anchor.x()+p.x())/2+8, (anchor.y()+p.y())/2+8)
@@ -157,17 +159,19 @@ class PhotoView(QGraphicsView):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('Photo Measuring App — v0.6')
+        self.setWindowTitle('Photo Measuring App — v0.7')
         self.resize(1180, 760)
         self.image_path = None
         self.feet_per_pixel = None
         self.calibration_points = None
+        self.axes = {}
         self.measurements = []
         self.paths = []
         self.active_path = []
         self.undo_stack = []
         self.redo_stack = []
         self.view = PhotoView()
+        self.view.distance_function = self.distance_ft
         self.view.points_selected.connect(self.points_received)
         self.view.path_point_selected.connect(self.add_path_point)
 
@@ -175,6 +179,10 @@ class MainWindow(QMainWindow):
         self.open_button.clicked.connect(self.open_photo)
         self.calibrate_button = QPushButton('Set / Replace Reference')
         self.calibrate_button.clicked.connect(lambda: self.begin('calibrate'))
+        self.x_axis_button = QPushButton('Set X Axis (known width)')
+        self.x_axis_button.clicked.connect(lambda: self.begin('axis_x'))
+        self.z_axis_button = QPushButton('Set Z Axis (known height)')
+        self.z_axis_button.clicked.connect(lambda: self.begin('axis_z'))
         self.measure_button = QPushButton('Measure Next Length')
         self.measure_button.clicked.connect(lambda: self.begin('measure'))
         self.continuous_button = QPushButton('Continuous Measurement')
@@ -203,6 +211,8 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(side)
         layout.addWidget(self.open_button)
         layout.addWidget(self.calibrate_button)
+        layout.addWidget(self.x_axis_button)
+        layout.addWidget(self.z_axis_button)
         layout.addWidget(self.measure_button)
         layout.addWidget(self.continuous_button)
         layout.addWidget(self.undo_button)
@@ -241,6 +251,7 @@ class MainWindow(QMainWindow):
         self.feet_per_pixel = None
         self.view.feet_per_pixel = None
         self.calibration_points = None
+        self.axes.clear()
         self.measurements.clear()
         self.paths.clear()
         self.active_path.clear()
@@ -256,7 +267,7 @@ class MainWindow(QMainWindow):
         if not self.image_path:
             QMessageBox.information(self, 'Load a photo', 'Open a photo first.')
             return
-        if mode in ('measure', 'continuous') and self.feet_per_pixel is None:
+        if mode in ('measure', 'continuous') and not self.is_calibrated():
             mode = 'calibrate'
         if self.active_path and mode != 'continuous':
             self.finish_path()
@@ -272,6 +283,31 @@ class MainWindow(QMainWindow):
         if distance_px < 1:
             QMessageBox.warning(self, 'Points too close', 'Choose two distinct points.')
             return
+        if self.view.mode in ('axis_x', 'axis_z'):
+            key = 'X' if self.view.mode == 'axis_x' else 'Z'
+            default = self.axes[key][2] if key in self.axes else (10.0 if key == 'X' else 8.0)
+            length, accepted = QInputDialog.getDouble(
+                self, f'Set {key} axis', f'Known {key} axis length (feet):',
+                default, 0.001, 100000.0, 3)
+            if not accepted:
+                return
+            proposed = dict(self.axes)
+            proposed[key] = (a, b, length)
+            if len(proposed) == 2:
+                x0, x1, _ = proposed['X']
+                z0, z1, _ = proposed['Z']
+                ux, uy = x1.x()-x0.x(), x1.y()-x0.y()
+                vx, vy = z1.x()-z0.x(), z1.y()-z0.y()
+                determinant = ux*vy-uy*vx
+                if abs(determinant) < 0.02*math.hypot(ux, uy)*math.hypot(vx, vy):
+                    QMessageBox.warning(self, 'Invalid axes',
+                        'X and Z directions are too close to parallel. Choose two distinct wall directions.')
+                    return
+            self.axes = proposed
+            self.view.set_mode('none')
+            self.update_calibration_status()
+            self.render_annotations()
+            return
         if self.view.mode == 'calibrate':
             length, accepted = QInputDialog.getDouble(self, 'Reference length',
                 'Actual distance between selected points (feet):',
@@ -284,7 +320,7 @@ class MainWindow(QMainWindow):
             self.apply_calibration()
         elif self.view.mode == 'measure' and self.feet_per_pixel is not None:
             label = self.alpha_label(len(self.measurements))
-            feet = distance_px * self.feet_per_pixel
+            feet = self.distance_ft(a, b)
             self.save_undo()
             self.measurements.append(Measurement(label, a, b, feet))
             self.measure_list.addItem(f'Measure {label}: {feet:.3f} ft')
@@ -292,7 +328,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f'Measure {label}: {feet:.3f} ft')
 
     def add_path_point(self, point):
-        if self.feet_per_pixel is None:
+        if not self.is_calibrated():
             return
         if self.active_path:
             previous = self.active_path[-1]
@@ -334,7 +370,7 @@ class MainWindow(QMainWindow):
     def enter_measurement(self):
         if not self.image_path:
             return
-        if self.feet_per_pixel is None:
+        if not self.is_calibrated():
             self.begin('calibrate')
             return
         if self.view.mode == 'continuous':
@@ -351,6 +387,34 @@ class MainWindow(QMainWindow):
         if self.view.mode == 'continuous':
             self.view.set_mode('none')
 
+    def is_calibrated(self):
+        return len(self.axes) == 2 or self.feet_per_pixel is not None
+
+    def distance_ft(self, a, b):
+        dx, dy = b.x()-a.x(), b.y()-a.y()
+        if len(self.axes) == 2:
+            x0, x1, width = self.axes['X']
+            z0, z1, height = self.axes['Z']
+            ux, uy = x1.x()-x0.x(), x1.y()-x0.y()
+            vx, vy = z1.x()-z0.x(), z1.y()-z0.y()
+            determinant = ux*vy-uy*vx
+            if abs(determinant) > 1e-9:
+                x_feet = (dx*vy-dy*vx)/determinant * width
+                z_feet = (ux*dy-uy*dx)/determinant * height
+                return math.hypot(x_feet, z_feet)
+        return math.hypot(dx, dy) * self.feet_per_pixel if self.feet_per_pixel is not None else None
+
+    def update_calibration_status(self):
+        if len(self.axes) == 2:
+            self.scale_text.setText('Calibration: X + Z axes (affine wall plane)')
+            self.instructions.setText('Two-axis correction active. Measure along the same wall plane.')
+        elif self.axes:
+            self.scale_text.setText('Calibration: one axis set; select the other axis')
+        elif self.feet_per_pixel is not None:
+            self.scale_text.setText(f'Scale: {self.feet_per_pixel:.7f} ft/image-pixel')
+        else:
+            self.scale_text.setText('Scale: not calibrated')
+
     def draw_path(self, points, title, color):
         if not points:
             return
@@ -361,7 +425,7 @@ class MainWindow(QMainWindow):
         total = 0.0
         for i in range(1, len(points)):
             a, b = points[i-1], points[i]
-            feet = math.hypot(b.x()-a.x(), b.y()-a.y()) * self.feet_per_pixel
+            feet = self.distance_ft(a, b)
             total += feet
             self.view.add_line(a, b, f'{i}: {feet:.3f} ft', color)
             self.measure_list.addItem(f'{title} segment {i}: {feet:.3f} ft')
@@ -387,7 +451,7 @@ class MainWindow(QMainWindow):
         self.feet_per_pixel = self.reference.value()/px
         self.view.feet_per_pixel = self.feet_per_pixel
         self.render_annotations()
-        self.scale_text.setText(f'Scale: {self.feet_per_pixel:.7f} ft/image-pixel')
+        self.update_calibration_status()
         self.instructions.setText('Reference set in feet. Move cursor for a live preview; hold and drag to position the endpoint.')
         self.view.set_mode('none')
         self.statusBar().showMessage('Calibration complete.')
@@ -398,6 +462,8 @@ class MainWindow(QMainWindow):
 
     def render_annotations(self):
         self.view.clear_annotations()
+        for key, (a, b, length) in self.axes.items():
+            self.view.add_line(a, b, f'{key} AXIS: {length:.3f} ft', '#ff6bc1' if key == 'X' else '#7caaff')
         if self.view.mode == 'continuous' and self.active_path:
             self.view.start_point = self.active_path[-1]
         if self.calibration_points:
@@ -410,10 +476,7 @@ class MainWindow(QMainWindow):
             self.draw_path(self.active_path, 'Current path', '#e8d66c')
         for measurement in self.measurements:
             if self.feet_per_pixel is not None:
-                pixel_length = math.hypot(
-                    measurement.end.x()-measurement.start.x(),
-                    measurement.end.y()-measurement.start.y())
-                measurement.feet = pixel_length * self.feet_per_pixel
+                measurement.feet = self.distance_ft(measurement.start, measurement.end)
             self.view.add_line(measurement.start, measurement.end,
                 f'{measurement.label}: {measurement.feet:.3f} ft', '#41e090')
             self.measure_list.addItem(
