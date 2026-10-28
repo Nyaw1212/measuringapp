@@ -55,24 +55,26 @@ class PhotoView(QGraphicsView):
         self.distance_function = None
         self.dragging_endpoint = False
         self.space_panning = False
+        self.pan_last = None
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         QApplication.instance().installEventFilter(self)
         self.setMouseTracking(True)
         self.setMinimumSize(700, 480)
 
     def eventFilter(self, obj, event):
-        if event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Space:
+        if event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Space and self.window().isActiveWindow():
             if not event.isAutoRepeat() and not self.space_panning:
                 self.space_panning = True
                 self.clear_preview()
-                self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
-                self.setCursor(Qt.CursorShape.OpenHandCursor)
+                self.setDragMode(QGraphicsView.DragMode.NoDrag)
+                self.viewport().setCursor(Qt.CursorShape.OpenHandCursor)
             return True
-        if event.type() == QEvent.Type.KeyRelease and event.key() == Qt.Key.Key_Space:
+        if event.type() == QEvent.Type.KeyRelease and event.key() == Qt.Key.Key_Space and self.window().isActiveWindow():
             if not event.isAutoRepeat() and self.space_panning:
                 self.space_panning = False
+                self.pan_last = None
                 self.setDragMode(QGraphicsView.DragMode.NoDrag)
-                self.setCursor(Qt.CursorShape.CrossCursor if self.mode != 'none'
+                self.viewport().setCursor(Qt.CursorShape.CrossCursor if self.mode != 'none'
                                else Qt.CursorShape.ArrowCursor)
             return True
         return super().eventFilter(obj, event)
@@ -131,7 +133,9 @@ class PhotoView(QGraphicsView):
 
     def mousePressEvent(self, event):
         if self.space_panning:
-            return super().mousePressEvent(event)
+            self.pan_last = event.position().toPoint()
+            self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
+            return
         if event.button() == Qt.MouseButton.LeftButton and self.mode != 'none' and self.pixmap_item:
             p = self.mapToScene(event.position().toPoint())
             if self.mode == 'corners':
@@ -149,7 +153,13 @@ class PhotoView(QGraphicsView):
 
     def mouseMoveEvent(self, event):
         if self.space_panning:
-            return super().mouseMoveEvent(event)
+            if self.pan_last is not None:
+                pos = event.position().toPoint()
+                delta = pos - self.pan_last
+                self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta.x())
+                self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta.y())
+                self.pan_last = pos
+            return
         if self.start_point is not None and self.pixmap_item:
             p = self.mapToScene(event.position().toPoint())
             self.update_preview(p)
@@ -157,7 +167,9 @@ class PhotoView(QGraphicsView):
 
     def mouseReleaseEvent(self, event):
         if self.space_panning:
-            return super().mouseReleaseEvent(event)
+            self.pan_last = None
+            self.viewport().setCursor(Qt.CursorShape.OpenHandCursor)
+            return
         if event.button() == Qt.MouseButton.LeftButton and self.dragging_endpoint:
             self.dragging_endpoint = False
             p = self.mapToScene(event.position().toPoint())
@@ -206,7 +218,7 @@ class PhotoView(QGraphicsView):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('Photo Measuring App — v1.2')
+        self.setWindowTitle('Photo Measuring App — v1.3')
         self.resize(1180, 760)
         self.image_path = None
         self.rotation_degrees = 0
