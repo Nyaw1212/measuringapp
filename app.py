@@ -56,28 +56,39 @@ class PhotoView(QGraphicsView):
         self.dragging_endpoint = False
         self.space_panning = False
         self.pan_last = None
+        self.pan_toggle = False
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         QApplication.instance().installEventFilter(self)
         self.setMouseTracking(True)
         self.setMinimumSize(700, 480)
 
+    def set_pan(self, active):
+        self.space_panning = active
+        self.pan_last = None
+        if active:
+            self.clear_preview()
+            if QApplication.overrideCursor() is None:
+                QApplication.setOverrideCursor(Qt.CursorShape.OpenHandCursor)
+            else:
+                QApplication.changeOverrideCursor(Qt.CursorShape.OpenHandCursor)
+        else:
+            if QApplication.overrideCursor() is not None:
+                QApplication.restoreOverrideCursor()
+            self.viewport().setCursor(Qt.CursorShape.CrossCursor if self.mode != 'none'
+                                      else Qt.CursorShape.ArrowCursor)
+
     def eventFilter(self, obj, event):
-        if event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Space and self.window().isActiveWindow():
-            if not event.isAutoRepeat() and not self.space_panning:
-                self.space_panning = True
-                self.clear_preview()
-                self.setDragMode(QGraphicsView.DragMode.NoDrag)
-                self.viewport().setCursor(Qt.CursorShape.OpenHandCursor)
+        if event.type() not in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
+            return False
+        if event.key() != Qt.Key.Key_Space or not self.window().isActiveWindow():
+            return False
+        if event.isAutoRepeat():
             return True
-        if event.type() == QEvent.Type.KeyRelease and event.key() == Qt.Key.Key_Space and self.window().isActiveWindow():
-            if not event.isAutoRepeat() and self.space_panning:
-                self.space_panning = False
-                self.pan_last = None
-                self.setDragMode(QGraphicsView.DragMode.NoDrag)
-                self.viewport().setCursor(Qt.CursorShape.CrossCursor if self.mode != 'none'
-                               else Qt.CursorShape.ArrowCursor)
-            return True
-        return super().eventFilter(obj, event)
+        if event.type() == QEvent.Type.KeyPress:
+            self.set_pan(True)
+        elif not self.pan_toggle:
+            self.set_pan(False)
+        return True
 
     def load_photo(self, path):
         photo = QPixmap(path)
@@ -134,7 +145,7 @@ class PhotoView(QGraphicsView):
     def mousePressEvent(self, event):
         if self.space_panning:
             self.pan_last = event.position().toPoint()
-            self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
+            QApplication.changeOverrideCursor(Qt.CursorShape.ClosedHandCursor)
             return
         if event.button() == Qt.MouseButton.LeftButton and self.mode != 'none' and self.pixmap_item:
             p = self.mapToScene(event.position().toPoint())
@@ -168,7 +179,7 @@ class PhotoView(QGraphicsView):
     def mouseReleaseEvent(self, event):
         if self.space_panning:
             self.pan_last = None
-            self.viewport().setCursor(Qt.CursorShape.OpenHandCursor)
+            QApplication.changeOverrideCursor(Qt.CursorShape.OpenHandCursor)
             return
         if event.button() == Qt.MouseButton.LeftButton and self.dragging_endpoint:
             self.dragging_endpoint = False
@@ -218,7 +229,7 @@ class PhotoView(QGraphicsView):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('Photo Measuring App — v1.3')
+        self.setWindowTitle('Photo Measuring App — v1.4')
         self.resize(1180, 760)
         self.image_path = None
         self.rotation_degrees = 0
@@ -242,6 +253,9 @@ class MainWindow(QMainWindow):
 
         self.update_button = QPushButton('Update && Restart App')
         self.update_button.clicked.connect(self.update_and_restart)
+        self.pan_button = QPushButton('Pan Mode (toggle)')
+        self.pan_button.setCheckable(True)
+        self.pan_button.toggled.connect(self.toggle_pan)
         self.open_button = QPushButton('Open Photo')
         self.open_button.clicked.connect(self.open_photo)
         self.calibrate_button = QPushButton('Set / Replace Reference')
@@ -295,6 +309,7 @@ class MainWindow(QMainWindow):
         side = QWidget()
         layout = QVBoxLayout(side)
         layout.addWidget(self.update_button)
+        layout.addWidget(self.pan_button)
         layout.addWidget(self.open_button)
         layout.addWidget(self.calibrate_button)
         layout.addWidget(self.x_axis_button)
@@ -356,6 +371,11 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, 'Update failed to launch', str(exc))
             return
         QApplication.instance().quit()
+
+    def toggle_pan(self, enabled):
+        self.view.pan_toggle = enabled
+        self.view.set_pan(enabled)
+        self.statusBar().showMessage('Pan mode ON — drag photo' if enabled else 'Pan mode OFF')
 
     def open_photo(self):
         path, _ = QFileDialog.getOpenFileName(self, 'Open Photo', '',
