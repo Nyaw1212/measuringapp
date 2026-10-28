@@ -231,7 +231,7 @@ class PhotoView(QGraphicsView):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('Photo Measuring App — v1.5')
+        self.setWindowTitle('Photo Measuring App — v1.6')
         self.resize(1180, 760)
         self.image_path = None
         self.rotation_degrees = 0
@@ -452,10 +452,9 @@ class MainWindow(QMainWindow):
         self.save_project()
         try:
             subprocess.Popen(
-                ['cmd.exe', '/c', 'start', '"Measuring App Updater"', 'cmd.exe',
-                 '/k', str(script)],
+                ['cmd.exe', '/c', str(script)],
                 cwd=str(script.parent),
-                creationflags=subprocess.CREATE_NO_WINDOW)
+                creationflags=subprocess.CREATE_NEW_CONSOLE)
         except OSError as exc:
             QMessageBox.critical(self, 'Update failed to launch', str(exc))
             return
