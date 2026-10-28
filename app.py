@@ -231,7 +231,7 @@ class PhotoView(QGraphicsView):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('Photo Measuring App — v1.6')
+        self.setWindowTitle('Photo Measuring App — v1.7')
         self.resize(1180, 760)
         self.image_path = None
         self.rotation_degrees = 0
@@ -349,7 +349,8 @@ class MainWindow(QMainWindow):
         self.redo_button.clicked.connect(self.redo)
         layout.insertWidget(5, self.redo_button)
         for keys, action in [('Ctrl+Z', self.undo), ('Ctrl+Y', self.redo),
-                             ('Ctrl+Shift+Z', self.redo), ('Return', self.enter_measurement)]:
+                             ('Ctrl+Shift+Z', self.redo), ('Return', self.enter_measurement),
+                             ('Q', self.enter_measurement)]:
             shortcut = QShortcut(QKeySequence(keys), self)
             shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
             shortcut.activated.connect(action)
