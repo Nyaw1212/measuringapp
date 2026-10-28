@@ -9,8 +9,24 @@ from pathlib import Path
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QBrush, QPen, QPixmap, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QApplication, QDoubleSpinBox, QFileDialog, QGraphicsPixmapItem,
-    QGraphicsScene, QGraphicsView, QHBoxLayout, QLabel, QListWidget, QMainWindow,
+    QGraphicsScene, QGraphicsView, QGraphicsEllipseItem, QHBoxLayout, QLabel, QListWidget, QMainWindow,
     QMessageBox, QPushButton, QVBoxLayout, QWidget, QInputDialog)
+
+class CornerHandle(QGraphicsEllipseItem):
+    def __init__(self, point, index, callback):
+        super().__init__(-7, -7, 14, 14)
+        self.setPos(point)
+        self.index = index
+        self.callback = callback
+        self.setBrush(QBrush(QColor('#ffdc44')))
+        self.setPen(QPen(QColor('#111827'), 2))
+        self.setZValue(30)
+        self.setFlag(QGraphicsEllipseItem.GraphicsItemFlag.ItemIsMovable, True)
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+
+    def mouseReleaseEvent(self, event):
+        super().mouseReleaseEvent(event)
+        self.callback(self.index, self.pos())
 
 @dataclass
 class Measurement:
@@ -164,7 +180,7 @@ class PhotoView(QGraphicsView):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('Photo Measuring App — v1.0')
+        self.setWindowTitle('Photo Measuring App — v1.1')
         self.resize(1180, 760)
         self.image_path = None
         self.rotation_degrees = 0
@@ -173,6 +189,8 @@ class MainWindow(QMainWindow):
         self.axes = {}
         self.corners = []
         self.homography = None
+        self.reference_width_ft = 16/12
+        self.reference_height_ft = 25.5/12
         self.measurements = []
         self.paths = []
         self.active_path = []
@@ -194,7 +212,7 @@ class MainWindow(QMainWindow):
         self.x_axis_button.clicked.connect(lambda: self.begin('axis_x'))
         self.z_axis_button = QPushButton('Set Z Axis (known height)')
         self.z_axis_button.clicked.connect(lambda: self.begin('axis_z'))
-        self.corners_button = QPushButton('Calibrate 4 Corners (DG224NRK)')
+        self.corners_button = QPushButton('Set Reference Rectangle (4 Corners)')
         self.corners_button.clicked.connect(self.begin_corners)
         self.measure_button = QPushButton('Measure Next Length')
         self.measure_button.clicked.connect(lambda: self.begin('measure'))
@@ -219,6 +237,18 @@ class MainWindow(QMainWindow):
         self.reference.setSuffix(' ft')
         self.reference.setToolTip('Known physical distance between calibration endpoints')
         self.reference.valueChanged.connect(self.reference_changed)
+        self.width_input = QDoubleSpinBox()
+        self.width_input.setRange(0.001, 100000)
+        self.width_input.setDecimals(4)
+        self.width_input.setSuffix(' ft')
+        self.width_input.setValue(self.reference_width_ft)
+        self.width_input.valueChanged.connect(self.reference_rectangle_changed)
+        self.height_input = QDoubleSpinBox()
+        self.height_input.setRange(0.001, 100000)
+        self.height_input.setDecimals(4)
+        self.height_input.setSuffix(' ft')
+        self.height_input.setValue(self.reference_height_ft)
+        self.height_input.valueChanged.connect(self.reference_rectangle_changed)
         self.measure_list = QListWidget()
         self.scale_text = QLabel('Scale: not calibrated')
         self.instructions = QLabel('Open a photo to begin.')
@@ -231,6 +261,10 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.calibrate_button)
         layout.addWidget(self.x_axis_button)
         layout.addWidget(self.z_axis_button)
+        layout.addWidget(QLabel('Reference width:'))
+        layout.addWidget(self.width_input)
+        layout.addWidget(QLabel('Reference height:'))
+        layout.addWidget(self.height_input)
         layout.addWidget(self.corners_button)
         layout.addWidget(self.measure_button)
         layout.addWidget(self.continuous_button)
@@ -367,7 +401,7 @@ class MainWindow(QMainWindow):
             self.reference.setValue(length)
             self.calibration_points = (a, b)
             self.apply_calibration()
-        elif self.view.mode == 'measure' and self.feet_per_pixel is not None:
+        elif self.view.mode == 'measure' and self.is_calibrated():
             label = self.alpha_label(len(self.measurements))
             feet = self.distance_ft(a, b)
             if feet is None:
@@ -447,31 +481,54 @@ class MainWindow(QMainWindow):
             self.finish_path()
         self.corners = []
         self.view.set_mode('corners')
-        self.instructions.setText('Click enclosure corners: top-left, top-right, bottom-right, bottom-left.')
+        self.instructions.setText('Click top-left, top-right, bottom-right, bottom-left. Drag yellow corners afterward.')
         self.render_annotations()
 
     def add_corner(self, point):
         self.corners.append(point)
         if len(self.corners) < 4:
-            self.instructions.setText(
-                f'{len(self.corners)}/4 corners selected. Next: ' +
-                ['top-left', 'top-right', 'bottom-right', 'bottom-left'][len(self.corners)])
+            self.instructions.setText(f'{len(self.corners)}/4 corners selected.')
             self.render_annotations()
             return
+        self.recalculate_rectangle()
+
+    def reference_rectangle_changed(self, _value):
+        self.reference_width_ft = self.width_input.value()
+        self.reference_height_ft = self.height_input.value()
+        if len(self.corners) == 4:
+            self.recalculate_rectangle()
+
+    def corner_moved(self, index, point):
+        if len(self.corners) != 4:
+            return
+        previous = self.corners[index]
+        self.corners[index] = point
+        if not self.recalculate_rectangle():
+            self.corners[index] = previous
+            self.render_annotations()
+
+    def recalculate_rectangle(self):
+        if len(self.corners) != 4:
+            return False
+        w, h = self.reference_width_ft, self.reference_height_ft
         try:
+            cross = []
+            for i in range(4):
+                a, b, c = [self.corners[j] for j in (i, (i+1)%4, (i+2)%4)]
+                cross.append((b.x()-a.x())*(c.y()-b.y()) -
+                             (b.y()-a.y())*(c.x()-b.x()))
+            if min(cross) <= 0 <= max(cross):
+                raise ValueError('Select a non-crossing convex four-corner outline.')
             proposed = self.solve_homography(
-                self.corners, [(0, 0), (16/12, 0),
-                               (16/12, 25.5/12), (0, 25.5/12)])
+                self.corners, [(0, 0), (w, 0), (w, h), (0, h)])
         except ValueError as exc:
-            QMessageBox.warning(self, 'Invalid corners', str(exc))
-            self.corners = []
-            self.render_annotations()
-            return
+            QMessageBox.warning(self, 'Invalid rectangle', str(exc))
+            return False
         self.homography = proposed
         self.view.set_mode('none')
         self.update_calibration_status()
         self.render_annotations()
-        self.statusBar().showMessage('Perspective calibration active — DG224NRK 16 × 25.5 in')
+        return True
 
     @staticmethod
     def solve_homography(points, targets):
@@ -534,8 +591,8 @@ class MainWindow(QMainWindow):
 
     def update_calibration_status(self):
         if self.homography is not None:
-            self.scale_text.setText('Calibration: 4-corner perspective (DG224NRK)')
-            self.instructions.setText('Perspective correction active on the enclosure wall plane.')
+            self.scale_text.setText(f'Perspective: {self.reference_width_ft:.4f} × {self.reference_height_ft:.4f} ft')
+            self.instructions.setText('Perspective active. Drag yellow handles to adjust corners.')
         elif len(self.axes) == 2:
             self.scale_text.setText('Calibration: X + Z axes (affine wall plane)')
             self.instructions.setText('Two-axis correction active. Measure along the same wall plane.')
@@ -597,7 +654,12 @@ class MainWindow(QMainWindow):
         self.view.clear_annotations()
         if self.corners:
             for i, p in enumerate(self.corners):
-                self.view.add_line(p, p, f'Corner {i+1}', '#facc15')
+                if len(self.corners) == 4:
+                    handle = CornerHandle(p, i, self.corner_moved)
+                    self.view.canvas.addItem(handle)
+                    self.view.overlays.append(handle)
+                else:
+                    self.view.add_line(p, p, f'Corner {i+1}', '#facc15')
             if len(self.corners) == 4:
                 for i in range(4):
                     self.view.add_line(self.corners[i], self.corners[(i+1)%4],
@@ -615,7 +677,7 @@ class MainWindow(QMainWindow):
         if self.active_path:
             self.draw_path(self.active_path, 'Current path', '#e8d66c')
         for measurement in self.measurements:
-            if self.feet_per_pixel is not None:
+            if self.is_calibrated():
                 measurement.feet = self.distance_ft(measurement.start, measurement.end)
             if measurement.feet is None:
                 continue
